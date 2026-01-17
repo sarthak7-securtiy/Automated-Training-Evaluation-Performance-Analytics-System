@@ -877,6 +877,152 @@ def get_overall_analytics():
         db_session.close()
         return jsonify({"error": str(e)}), 500
 
+@app.route('/api/analytics/trends', methods=['GET'])
+def get_performance_trends():
+    """Get performance stats grouped by month for line charts"""
+    db_session = get_db_session()
+    try:
+        # Group tests by month
+        from sqlalchemy import func, extract
+        
+        # We'll use date_conducted if available, otherwise date_uploaded
+        date_field = func.coalesce(Test.date_conducted, Test.date_uploaded)
+        
+        # Query for Pre-Test averages by month
+        pre_stats = db_session.query(
+            extract('year', date_field).label('year'),
+            extract('month', date_field).label('month'),
+            func.avg(Evaluation.percentage).label('avg_score')
+        ).join(Evaluation, Test.test_id == Evaluation.test_id)\
+         .filter(Test.test_type == 'Pre-Test')\
+         .group_by('year', 'month')\
+         .order_by('year', 'month').all()
+        
+        # Query for Post-Test averages by month
+        post_stats = db_session.query(
+            extract('year', date_field).label('year'),
+            extract('month', date_field).label('month'),
+            func.avg(Evaluation.percentage).label('avg_score')
+        ).join(Evaluation, Test.test_id == Evaluation.test_id)\
+         .filter(Test.test_type == 'Post-Test')\
+         .group_by('year', 'month')\
+         .order_by('year', 'month').all()
+        
+        # Format labels: "Month Year"
+        import calendar
+        
+        months_set = set()
+        for s in pre_stats: months_set.add((int(s.year), int(s.month)))
+        for s in post_stats: months_set.add((int(s.year), int(s.month)))
+        
+        sorted_months = sorted(list(months_set))
+        labels = [f"{calendar.month_name[m[1]][:3]} {m[0]}" for m in sorted_months]
+        
+        pre_scores = []
+        post_scores = []
+        
+        pre_map = {(int(s.year), int(s.month)): s.avg_score for s in pre_stats}
+        post_map = {(int(s.year), int(s.month)): s.avg_score for s in post_stats}
+        
+        for m in sorted_months:
+            pre_scores.append(pre_map.get(m, 0))
+            post_scores.append(post_map.get(m, 0))
+            
+        db_session.close()
+        return jsonify({
+            "labels": labels,
+            "pre_test_avg": pre_scores,
+            "post_test_avg": post_scores
+        })
+    except Exception as e:
+        db_session.close()
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/analytics/training-comparison', methods=['GET'])
+def get_training_comparison():
+    """Get average pre and post test scores grouped by training name"""
+    db_session = get_db_session()
+    try:
+        from sqlalchemy import func
+        
+        # Get all training names
+        trainings = db_session.query(Test.training_name).distinct().all()
+        training_names = [t[0] for t in trainings if t[0]]
+        
+        result = {
+            "labels": [],
+            "pre_test_avgs": [],
+            "post_test_avgs": []
+        }
+        
+        for name in training_names:
+            # Pre-test average for this training
+            pre_avg = db_session.query(func.avg(Evaluation.percentage))\
+                .join(Test, Test.test_id == Evaluation.test_id)\
+                .filter(Test.training_name == name, Test.test_type == 'Pre-Test')\
+                .scalar()
+            
+            # Post-test average for this training
+            post_avg = db_session.query(func.avg(Evaluation.percentage))\
+                .join(Test, Test.test_id == Evaluation.test_id)\
+                .filter(Test.training_name == name, Test.test_type == 'Post-Test')\
+                .scalar()
+            
+            # Only include if we have at least one of them
+            if pre_avg is not None or post_avg is not None:
+                result["labels"].append(name)
+                result["pre_test_avgs"].append(round(float(pre_avg or 0), 2))
+                result["post_test_avgs"].append(round(float(post_avg or 0), 2))
+        
+        # Limit to top 5 or 10 trainings
+        result["labels"] = result["labels"][:10]
+        result["pre_test_avgs"] = result["pre_test_avgs"][:10]
+        result["post_test_avgs"] = result["post_test_avgs"][:10]
+        
+        db_session.close()
+        return jsonify(result)
+    except Exception as e:
+        db_session.close()
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/analytics/performers', methods=['GET'])
+def get_performers():
+    """Get top or bottom performers."""
+    db_session = get_db_session()
+    try:
+        from sqlalchemy import func, asc, desc
+        from flask import request
+        
+        sort_order = request.args.get('sort', 'top') # 'top' or 'bottom'
+        limit = int(request.args.get('limit', 10))
+        
+        query = db_session.query(
+            Evaluation.candidate_id,
+            func.max(Evaluation.percentage).label('max_score'),
+            func.avg(Evaluation.percentage).label('avg_score')
+        ).group_by(Evaluation.candidate_id)
+        
+        if sort_order == 'top':
+            query = query.order_by(desc('max_score'))
+        else: # 'bottom'
+            query = query.order_by(asc('max_score'))
+            
+        performers = query.limit(limit).all()
+        
+        result = []
+        for p in performers:
+            result.append({
+                'candidate_id': p.candidate_id,
+                'max_score': round(float(p.max_score), 2),
+                'avg_score': round(float(p.avg_score), 2)
+            })
+            
+        db_session.close()
+        return jsonify(result)
+    except Exception as e:
+        db_session.close()
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/api/analytics/combined-pass-rate', methods=['GET'])
 def get_combined_pass_rate():
     """Get combined pass rate across all trainings in Excel sheets"""
